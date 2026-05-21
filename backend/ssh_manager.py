@@ -73,6 +73,9 @@ class SSHManager:
             look_for_keys=False,
             allow_agent=False,
         )
+        transport = client.get_transport()
+        if transport:
+            transport.set_keepalive(30)
         return cls(client=client, server_ip=host, username=ssh_user, port=port)
 
     @staticmethod

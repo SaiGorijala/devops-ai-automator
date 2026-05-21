@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,25 +67,7 @@ class SonarScanner:
     ) -> ScanResult:
         path = Path(project_path).resolve()
         key = self._project_key(project_key or path.name)
-        docker_result = run_command(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "-e",
-                f"SONAR_HOST_URL={sonar_host}",
-                "-e",
-                f"SONAR_TOKEN={sonar_token}",
-                "-v",
-                f"{path}:/usr/src",
-                "sonarsource/sonar-scanner-cli:latest",
-                f"-Dsonar.projectKey={key}",
-                "-Dsonar.sources=.",
-                "-Dsonar.sourceEncoding=UTF-8",
-            ],
-            timeout=900,
-        )
-        if not docker_result.ok:
+        if shutil.which("sonar-scanner"):
             cli_result = run_command(
                 [
                     "sonar-scanner",
@@ -100,6 +83,25 @@ class SonarScanner:
             cli_result.raise_for_error()
             output = cli_result.stdout + cli_result.stderr
         else:
+            docker_result = run_command(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "-e",
+                    f"SONAR_HOST_URL={sonar_host}",
+                    "-e",
+                    f"SONAR_TOKEN={sonar_token}",
+                    "-v",
+                    f"{path}:/usr/src",
+                    "sonarsource/sonar-scanner-cli:latest",
+                    f"-Dsonar.projectKey={key}",
+                    "-Dsonar.sources=.",
+                    "-Dsonar.sourceEncoding=UTF-8",
+                ],
+                timeout=900,
+            )
+            docker_result.raise_for_error()
             output = docker_result.stdout + docker_result.stderr
 
         scan_id = self._extract_task_id(path, output)

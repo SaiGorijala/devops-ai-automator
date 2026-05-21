@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 
 from .config import settings
-from .ssh_manager import SSHManager
+from .ssh_manager import CommandResult, SSHManager
 
 
 def _password(length: int = 20) -> str:
@@ -59,10 +59,10 @@ class DockerOrchestrator:
             "sudo apt-get update -y >/dev/null; "
             "sudo apt-get install -y curl >/dev/null; "
             f"cd {shlex.quote(remote_dir)}; "
-            "sudo docker compose up -d"
+            f"sudo docker compose -p {shlex.quote(self.stack + '-sonar')} up -d"
         )
         self.ssh.execute_command(setup_cmd, timeout=900, get_pty=True).raise_for_error()
-        self.sonarqube_health_check(port=port, timeout=180)
+        self.sonarqube_health_check(port=port, timeout=420)
         self._set_sonar_admin_password(port, admin_password)
         token = self._create_sonar_token(port, admin_password, token_name)
         return SonarInfo(
@@ -80,7 +80,7 @@ class DockerOrchestrator:
         self.ssh.transfer_file(self._jenkins_compose(port, container_name), f"{remote_dir}/docker-compose.yml")
         cmd = (
             f"cd {shlex.quote(remote_dir)}; "
-            "sudo docker compose up -d"
+            f"sudo docker compose -p {shlex.quote(self.stack + '-jenkins')} up -d"
         )
         self.ssh.execute_command(cmd, timeout=600, get_pty=True).raise_for_error()
         self.jenkins_wait_for_startup(port=port, timeout=240)
@@ -97,11 +97,11 @@ class DockerOrchestrator:
         deadline = time.time() + timeout
         last_output = ""
         while time.time() < deadline:
-            result = self.ssh.execute_command(
-                f"curl -sf http://127.0.0.1:{port}/api/system/status || true",
-                timeout=20,
+            result = self._non_blocking_curl(
+                f"http://127.0.0.1:{port}/api/system/status",
+                timeout=15,
             )
-            last_output = result.stdout.strip()
+            last_output = (result.stdout + result.stderr).strip()
             if '"status":"UP"' in last_output or '"status":"GREEN"' in last_output:
                 return last_output
             time.sleep(5)
@@ -109,19 +109,32 @@ class DockerOrchestrator:
 
     def jenkins_wait_for_startup(self, port: int = 8080, timeout: int = 180) -> bool:
         deadline = time.time() + timeout
+        last_output = ""
         while time.time() < deadline:
-            result = self.ssh.execute_command(
-                f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{port}/login || true",
-                timeout=20,
+            result = self._non_blocking_curl(
+                f"http://127.0.0.1:{port}/login",
+                extra_args="-o /dev/null -w '%{http_code}'",
+                timeout=15,
             )
+            last_output = (result.stdout + result.stderr).strip()
             if result.stdout.strip() in {"200", "403"}:
                 return True
             time.sleep(5)
-        raise TimeoutError(f"Jenkins did not become ready within {timeout}s")
+        raise TimeoutError(f"Jenkins did not become ready within {timeout}s. Last response: {last_output}")
+
+    def _non_blocking_curl(self, url: str, extra_args: str = "", timeout: int = 15):
+        command = (
+            "curl -fsS --connect-timeout 3 --max-time 8 "
+            f"{extra_args} {shlex.quote(url)} || true"
+        )
+        try:
+            return self.ssh.execute_command(command, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - individual health probes should not kill startup waits.
+            return CommandResult(stdout="", stderr=str(exc), exit_code=124, command=command)
 
     def _set_sonar_admin_password(self, port: int, new_password: str) -> None:
         result = self.ssh.execute_command(
-            "curl -sf -u admin:admin "
+            "curl -fsS --connect-timeout 5 --max-time 20 -u admin:admin "
             "-X POST "
             f"-d login=admin -d previousPassword=admin -d password={shlex.quote(new_password)} "
             f"http://127.0.0.1:{port}/api/users/change_password",
@@ -130,14 +143,14 @@ class DockerOrchestrator:
         if not result.ok:
             # A previous retry may already have changed the password. Verify generated credentials work.
             verify = self.ssh.execute_command(
-                f"curl -sf -u admin:{shlex.quote(new_password)} http://127.0.0.1:{port}/api/authentication/validate",
+                f"curl -fsS --connect-timeout 5 --max-time 20 -u admin:{shlex.quote(new_password)} http://127.0.0.1:{port}/api/authentication/validate",
                 timeout=30,
             )
             verify.raise_for_error()
 
     def _create_sonar_token(self, port: int, admin_password: str, token_name: str) -> str:
         result = self.ssh.execute_command(
-            f"curl -sf -u admin:{shlex.quote(admin_password)} "
+            f"curl -fsS --connect-timeout 5 --max-time 20 -u admin:{shlex.quote(admin_password)} "
             "-X POST "
             f"-d name={shlex.quote(token_name)} "
             f"http://127.0.0.1:{port}/api/user_tokens/generate",

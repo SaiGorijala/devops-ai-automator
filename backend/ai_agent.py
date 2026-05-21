@@ -7,7 +7,7 @@ import re
 import shlex
 import shutil
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 import httpx
 
@@ -51,10 +51,11 @@ class AIAgent:
                 last_error = exc
                 error_msg = str(exc)
                 await self.log_error(error_msg, context, stage=stage, attempt=attempt)
+                system_info = await self._safe_system_context(fix_location=fix_location, cwd=cwd)
                 commands = await self.query_llm_for_fix(
                     error=error_msg,
                     context=context,
-                    system_info=await self.get_system_context(fix_location=fix_location, cwd=cwd),
+                    system_info=system_info,
                     stage=stage,
                 )
                 if not commands:
@@ -94,16 +95,7 @@ Do not print secrets. Do not delete application source code.
 Your fix commands:"""
         try:
             async with httpx.AsyncClient(timeout=90) as client:
-                response = await client.post(
-                    f"{self.ollama_host}/api/generate",
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "temperature": 0.3,
-                    },
-                )
-                response.raise_for_status()
+                response = await self._generate_with_model_recovery(client, prompt, stage)
                 raw = response.json().get("response", "")
         except Exception as exc:  # noqa: BLE001
             await self.log_ai_action(
@@ -121,6 +113,39 @@ Your fix commands:"""
                 intervention_type="action",
             )
         return commands
+
+    async def _generate_with_model_recovery(
+        self,
+        client: httpx.AsyncClient,
+        prompt: str,
+        stage: str | None,
+    ) -> httpx.Response:
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "temperature": 0.3,
+        }
+        response = await client.post(f"{self.ollama_host}/api/generate", json=payload)
+        if response.status_code != 404:
+            response.raise_for_status()
+            return response
+
+        detail = response.text[:300]
+        await self.log_ai_action(
+            f"Ollama returned 404 for model '{self.model}'. Pulling model before retry. Detail: {detail}",
+            stage=stage,
+            intervention_type="warn",
+        )
+        pull_response = await client.post(
+            f"{self.ollama_host}/api/pull",
+            json={"name": self.model, "stream": False},
+            timeout=settings.max_pipeline_duration,
+        )
+        pull_response.raise_for_status()
+        retry = await client.post(f"{self.ollama_host}/api/generate", json=payload)
+        retry.raise_for_status()
+        return retry
 
     async def execute_fix(self, command: str, stage: str | None = None) -> CommandResult | None:
         original = command
@@ -175,6 +200,16 @@ Your fix commands:"""
         cwd_text = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
         return f"local_os={platform.platform()}\npython={platform.python_version()}\ncwd={cwd_text}"
 
+    async def _safe_system_context(
+        self,
+        fix_location: str = "remote",
+        cwd: str | Path | None = None,
+    ) -> str:
+        try:
+            return await self.get_system_context(fix_location=fix_location, cwd=cwd)
+        except Exception as exc:  # noqa: BLE001
+            return f"system_context_unavailable={exc}"
+
     def fallback_for_error(self, error: str) -> list[str]:
         return self.dynamic_error_patterns(error)
 
@@ -186,6 +221,15 @@ Your fix commands:"""
                 "sudo systemctl restart docker || true",
                 f"sudo usermod -aG docker {shlex.quote(user)} || true",
             ]
+        if "no such file or directory" in lower and "'docker'" in lower:
+            return [
+                "if command -v apt-get >/dev/null; then apt-get update && apt-get install -y docker.io; elif command -v apk >/dev/null; then apk add --no-cache docker-cli; fi",
+                "docker --version",
+            ]
+        if "no such file or directory" in lower and "'sonar-scanner'" in lower:
+            return [self._install_sonar_scanner_command()]
+        if "sonar-scanner" in lower and ("not found" in lower or "command not found" in lower):
+            return [self._install_sonar_scanner_command()]
         if "port" in lower and ("already in use" in lower or "bind" in lower or "allocated" in lower):
             match = re.search(r":(\d{2,5})", error)
             port = match.group(1) if match else "3000"
@@ -200,6 +244,13 @@ Your fix commands:"""
                 "sudo docker ps --format '{{.Names}}' | grep sonarqube | xargs -r sudo docker restart",
                 "sleep 30",
             ]
+        if "api/system/status" in lower and ("timeout" in lower or "timed out" in lower):
+            return [
+                "sudo docker ps --format '{{.Names}}' | grep sonarqube | xargs -r sudo docker restart",
+                "sleep 30",
+            ]
+        if "timeout opening channel" in lower:
+            return ["sleep 15"]
         if "authentication failed" in lower and "git" in lower:
             return ["git config --global --unset credential.helper || true"]
         if "no space left" in lower:
@@ -207,6 +258,23 @@ Your fix commands:"""
         if "temporary failure resolving" in lower or "could not resolve" in lower:
             return ["sudo systemctl restart systemd-resolved || true"]
         return []
+
+    @staticmethod
+    def _install_sonar_scanner_command() -> str:
+        return (
+            "if command -v apt-get >/dev/null; then "
+            "apt-get update && apt-get install -y curl unzip openjdk-17-jre-headless; "
+            "fi; "
+            "cd /tmp && "
+            "curl -fsSLo sonar-scanner.zip "
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/"
+            "sonar-scanner-cli-5.0.1.3006-linux.zip && "
+            "rm -rf /opt/sonar-scanner && "
+            "unzip -q -o sonar-scanner.zip -d /opt && "
+            "mv /opt/sonar-scanner-* /opt/sonar-scanner && "
+            "ln -sf /opt/sonar-scanner/bin/sonar-scanner /usr/local/bin/sonar-scanner && "
+            "sonar-scanner --version"
+        )
 
     async def log_error(
         self,

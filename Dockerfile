@@ -18,8 +18,19 @@ RUN apt-get update \
        curl \
        docker.io \
        git \
+       openjdk-17-jre-headless \
        openssh-client \
+       unzip \
     && rm -rf /var/lib/apt/lists/*
+
+RUN docker --version \
+    && curl -fsSLo /tmp/sonar-scanner.zip \
+       https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip \
+    && unzip -q /tmp/sonar-scanner.zip -d /opt \
+    && mv /opt/sonar-scanner-* /opt/sonar-scanner \
+    && ln -sf /opt/sonar-scanner/bin/sonar-scanner /usr/local/bin/sonar-scanner \
+    && sonar-scanner --version \
+    && rm -f /tmp/sonar-scanner.zip
 
 WORKDIR /app
 COPY requirements.txt .
@@ -31,4 +42,3 @@ COPY --from=frontend /frontend/dist ./frontend/dist
 
 EXPOSE 8000
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
-

@@ -30,20 +30,34 @@ def run_command(
     input_text: str | None = None,
     env: dict[str, str] | None = None,
 ) -> LocalCommandResult:
-    completed = subprocess.run(
-        command,
-        cwd=str(cwd) if cwd else None,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        env=env,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd else None,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return LocalCommandResult(
+            stdout="",
+            stderr=str(exc),
+            exit_code=127,
+            command=command,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return LocalCommandResult(
+            stdout=exc.stdout or "",
+            stderr=(exc.stderr or "") + f"\nCommand timed out after {timeout}s",
+            exit_code=124,
+            command=command,
+        )
     return LocalCommandResult(
         stdout=completed.stdout,
         stderr=completed.stderr,
         exit_code=completed.returncode,
         command=command,
     )
-

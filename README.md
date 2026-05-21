@@ -66,6 +66,16 @@ Default model:
 deepseek-coder:6.7b
 ```
 
+Useful checks:
+
+```bash
+docker compose logs ollama-init
+docker compose exec ollama ollama list
+docker compose exec backend curl -s http://ollama:11434/api/tags
+docker compose exec backend which docker
+docker compose exec backend which sonar-scanner
+```
+
 ## Local Development
 
 Backend:
