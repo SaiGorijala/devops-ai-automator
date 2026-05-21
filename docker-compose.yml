@@ -1,0 +1,74 @@
+version: "3.8"
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: production
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-change-me-before-production}
+      OLLAMA_HOST: http://ollama:11434
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-coder:6.7b}
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: sqlite+aiosqlite:////data/devops_ai.db
+      MAX_PIPELINE_DURATION: ${MAX_PIPELINE_DURATION:-1800}
+      SSH_TIMEOUT: ${SSH_TIMEOUT:-30}
+      SSH_USER: ${SSH_USER:-ubuntu}
+      LOCAL_WORKSPACE: /app/workspace
+      REMOTE_WORKSPACE: ${REMOTE_WORKSPACE:-/opt/devops-ai-automator}
+      DOCKERHUB_REPO_NAME: ${DOCKERHUB_REPO_NAME:-devops-ai-app}
+      AI_AUTO_EXECUTE: ${AI_AUTO_EXECUTE:-true}
+      AI_ALLOW_DANGEROUS_COMMANDS: ${AI_ALLOW_DANGEROUS_COMMANDS:-false}
+    volumes:
+      - backend_data:/data
+      - backend_workspace:/app/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - ollama
+      - redis
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    command: serve
+
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-coder:6.7b}
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      sleep 10 &&
+      ollama pull ${DEEPSEEK_MODEL:-deepseek-coder:6.7b}
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: devops_ai
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  backend_data:
+  backend_workspace:
+  ollama_data:
+  postgres_data:
