@@ -162,13 +162,13 @@ class DockerOrchestrator:
         plugins = "git workflow-aggregator sonar docker-workflow github configuration-as-code"
         result = self.ssh.execute_command(
             f"sudo docker exec -u jenkins {shlex.quote(container_name)} "
-            f"jenkins-plugin-cli --plugins {shlex.quote(plugins)}",
+            f"jenkins-plugin-cli --plugins {plugins}",
             timeout=900,
             get_pty=True,
         )
-        if result.ok:
-            self.ssh.execute_command(f"sudo docker restart {shlex.quote(container_name)}", timeout=60)
-            self.jenkins_wait_for_startup(port=port, timeout=240)
+        result.raise_for_error()
+        self.ssh.execute_command(f"sudo docker restart {shlex.quote(container_name)}", timeout=60)
+        self.jenkins_wait_for_startup(port=port, timeout=240)
 
     def _sonarqube_compose(self, port: int) -> str:
         return f"""services:
@@ -216,7 +216,6 @@ volumes:
     restart: unless-stopped
     ports:
       - "{port}:8080"
-      - "50000:50000"
     environment:
       JAVA_OPTS: "-Djenkins.install.runSetupWizard=true"
     volumes:

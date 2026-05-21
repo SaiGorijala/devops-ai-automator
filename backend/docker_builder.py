@@ -154,7 +154,7 @@ CMD ["java", "-jar", "app.jar"]
 WORKDIR /src
 COPY . .
 RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/app ./...
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/app .
 
 FROM alpine:3.20
 WORKDIR /app

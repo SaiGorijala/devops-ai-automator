@@ -112,7 +112,10 @@ class SessionStore:
             stages = dict(session.stages or {})
             stages[stage] = status
             session.stages = stages
-            session.current_stage = stage if status == "running" else session.current_stage
+            if status == "running":
+                session.current_stage = stage
+            elif session.current_stage == stage:
+                session.current_stage = None
             if progress is not None:
                 session.progress = progress
 

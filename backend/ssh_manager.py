@@ -155,7 +155,7 @@ class SSHManager:
         install_cmd = (
             "set -e; "
             "sudo apt-get update -y; "
-            "sudo apt-get install -y ca-certificates curl gnupg lsb-release; "
+            "sudo apt-get install -y ca-certificates curl gnupg iproute2 lsb-release; "
             "curl -fsSL https://get.docker.com | sudo sh; "
             "sudo systemctl enable --now docker; "
             f"sudo usermod -aG docker {shlex.quote(self.username)} || true; "
