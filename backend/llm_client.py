@@ -49,6 +49,29 @@ class LLMClient:
             status["ollama_error"] = str(exc)
         return status
 
+    async def test_ollama_generation(self, prompt: str = "Return only: OK") -> dict[str, Any]:
+        result = {
+            "ollama_reachable": False,
+            "model_loaded": False,
+            "test_response": None,
+            "models": [],
+        }
+        health = await self.health()
+        result["ollama_reachable"] = bool(health.get("ollama_ready"))
+        result["models"] = health.get("ollama_models", [])
+        result["model"] = self.ollama_model
+        result["ollama_host"] = self.ollama_host
+        if not result["ollama_reachable"]:
+            result["error"] = health.get("ollama_error", "Ollama is not reachable")
+            return result
+        try:
+            raw = await self._query_ollama(prompt)
+            result["model_loaded"] = True
+            result["test_response"] = raw
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = str(exc)
+        return result
+
     async def query_json(self, prompt: str, fallback: dict[str, Any] | None = None) -> LLMResult:
         fallback = fallback or {}
         if self.claude_api_key:
@@ -97,6 +120,16 @@ class LLMClient:
     def build_fix_prompt(self, error_context: dict[str, Any]) -> str:
         stdout = str(error_context.get("stdout", ""))[-50000:]
         stderr = str(error_context.get("stderr", ""))[-50000:]
+        location = error_context.get("system", {}).get("location")
+        ssh_note = ""
+        if "SSH" in str(error_context.get("operation", "")) or "ssh" in stderr.lower():
+            ssh_note = """
+SSH-SPECIFIC INSTRUCTIONS
+- The failed connection happened before a remote shell existed.
+- If location is local, commands run inside the backend container, so use diagnostics only.
+- Good commands: getent hosts, python socket connect, nc -vz, ssh -vvv with BatchMode.
+- Do not suggest ufw, systemctl, or remote service changes unless a remote shell is already available.
+"""
         return f"""You are a senior DevOps remediation agent. A deployment command failed.
 
 ERROR DETAILS
@@ -117,6 +150,9 @@ DEPLOYMENT CONTEXT:
 
 SYSTEM INFO:
 {json.dumps(error_context.get("system", {}), indent=2)}
+
+FIX LOCATION: {location}
+{ssh_note}
 
 REQUIREMENTS
 1. Return exact bash commands that are safe and idempotent.
@@ -165,6 +201,11 @@ Return ONLY valid JSON:
             "prompt": prompt,
             "stream": False,
             "temperature": 0.2,
+            "options": {
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "num_predict": 1200,
+            },
         }
         async with httpx.AsyncClient(timeout=settings.llm_timeout) as client:
             response = await client.post(f"{self.ollama_host}/api/generate", json=payload)
@@ -180,7 +221,15 @@ Return ONLY valid JSON:
             return response.json().get("response", "").strip()
 
     def _normalize_fix(self, provider: str, raw: str) -> dict[str, Any]:
-        data = self._parse_json_object(raw)
+        try:
+            data = self._parse_json_object(raw)
+        except Exception:
+            data = {
+                "analysis": "LLM returned non-JSON text; extracted shell-like commands",
+                "commands": self._extract_shell_commands(raw),
+                "verification": "",
+                "confidence": 0.45,
+            }
         commands = data.get("commands", [])
         if isinstance(commands, str):
             commands = [line.strip() for line in commands.splitlines() if line.strip()]
@@ -200,6 +249,33 @@ Return ONLY valid JSON:
             "confidence": max(0.0, min(1.0, confidence)),
             "raw": raw,
         }
+
+    @staticmethod
+    def _extract_shell_commands(raw: str) -> list[str]:
+        prefixes = (
+            "ping ",
+            "nc ",
+            "ncat ",
+            "telnet ",
+            "ssh ",
+            "ssh-keygen ",
+            "getent ",
+            "python ",
+            "python3 ",
+            "docker ",
+            "curl ",
+            "timeout ",
+            "test ",
+            "echo ",
+        )
+        commands: list[str] = []
+        for line in raw.splitlines():
+            line = line.strip().strip("`")
+            if line.startswith("$ "):
+                line = line[2:].strip()
+            if line and line.startswith(prefixes):
+                commands.append(line)
+        return commands[:8]
 
     @staticmethod
     def _parse_json_object(raw: str) -> dict[str, Any]:

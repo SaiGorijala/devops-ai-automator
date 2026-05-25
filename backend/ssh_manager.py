@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import posixpath
 import shlex
 import socket
@@ -58,25 +59,96 @@ class SSHManager:
     ) -> "SSHManager":
         parsed_user, host, port = cls._parse_target(server_ip)
         ssh_user = username or parsed_user or settings.ssh_user
+        timeout = timeout or settings.ssh_timeout
+        print(f"[SSH] Connecting to {host}:{port} as {ssh_user}", flush=True)
+        diagnostics = cls.connectivity_diagnostics(host, port, timeout=min(timeout, 10))
         private_key = cls._load_private_key(pem_content)
 
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=host,
-            port=port,
-            username=ssh_user,
-            pkey=private_key,
-            timeout=timeout or settings.ssh_timeout,
-            banner_timeout=timeout or settings.ssh_timeout,
-            auth_timeout=timeout or settings.ssh_timeout,
-            look_for_keys=False,
-            allow_agent=False,
-        )
-        transport = client.get_transport()
-        if transport:
-            transport.set_keepalive(30)
-        return cls(client=client, server_ip=host, username=ssh_user, port=port)
+        try:
+            client.connect(
+                hostname=host,
+                port=port,
+                username=ssh_user,
+                pkey=private_key,
+                timeout=timeout,
+                banner_timeout=max(timeout, 30),
+                auth_timeout=timeout,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            transport = client.get_transport()
+            if transport:
+                transport.set_keepalive(30)
+            manager = cls(client=client, server_ip=host, username=ssh_user, port=port)
+            manager.execute_command("echo SSH_CONNECTED", timeout=15).raise_for_error()
+            print(f"[SSH] Connected successfully to {host}:{port}", flush=True)
+            return manager
+        except Exception as exc:  # noqa: BLE001 - enrich all SSH connection failures for the AI solver.
+            client.close()
+            error_type = cls._classify_connect_error(exc)
+            payload = {
+                "error_type": error_type,
+                "host": host,
+                "port": port,
+                "username": ssh_user,
+                "diagnostics": diagnostics,
+                "message": str(exc),
+                "hint": cls._connect_hint(error_type),
+            }
+            print(f"[SSH] Connection failed: {json.dumps(payload, sort_keys=True)}", flush=True)
+            raise RuntimeError(f"SSH connection failed: {json.dumps(payload, sort_keys=True)}") from exc
+
+    @classmethod
+    def connectivity_diagnostics(cls, host: str, port: int = 22, timeout: int = 10) -> dict[str, object]:
+        diagnostics: dict[str, object] = {
+            "host": host,
+            "port": port,
+            "dns": False,
+            "tcp_connect": False,
+        }
+        try:
+            addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            diagnostics["dns"] = True
+            diagnostics["addresses"] = sorted({item[4][0] for item in addresses})
+        except OSError as exc:
+            diagnostics["dns_error"] = str(exc)
+            return diagnostics
+        start = time.time()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                diagnostics["tcp_connect"] = True
+        except OSError as exc:
+            diagnostics["tcp_error"] = str(exc)
+        diagnostics["tcp_elapsed_seconds"] = round(time.time() - start, 2)
+        return diagnostics
+
+    @staticmethod
+    def _classify_connect_error(exc: Exception) -> str:
+        text = str(exc).lower()
+        if "error reading ssh protocol banner" in text or "protocol banner" in text:
+            return "ssh_protocol_banner"
+        if "timed out" in text or isinstance(exc, socket.timeout):
+            return "ssh_timeout"
+        if "authentication" in text or "not found in known_hosts" in text:
+            return "ssh_authentication"
+        if "no route to host" in text or "network is unreachable" in text:
+            return "network_unreachable"
+        if "connection refused" in text:
+            return "connection_refused"
+        return exc.__class__.__name__
+
+    @staticmethod
+    def _connect_hint(error_type: str) -> str:
+        hints = {
+            "ssh_protocol_banner": "TCP port is reachable but did not return a valid SSH banner in time. Check security group, firewall, SSH daemon health, wrong port, or a non-SSH service on the port.",
+            "ssh_timeout": "The target did not complete SSH handshake before timeout. Check public IP, inbound port 22, route table, and instance status.",
+            "ssh_authentication": "The server rejected authentication. Check username, PEM key, and authorized_keys.",
+            "network_unreachable": "The backend cannot route to the target host.",
+            "connection_refused": "The host actively refused the TCP connection. SSH may not be running or the wrong port is configured.",
+        }
+        return hints.get(error_type, "Inspect SSH connectivity, authentication, and target service logs.")
 
     @staticmethod
     def _parse_target(target: str) -> tuple[str | None, str, int]:

@@ -89,6 +89,7 @@ class BaseAgent:
             message_type=message_type,
             content={"message": message, "stage": stage, **content},
         ).to_dict()
+        print(f"[AI] {self.name} -> {to_agent}: {message}", flush=True)
         await self.store.add_ai_intervention(
             self.session_id,
             f"{self.name}: {message}",
@@ -563,17 +564,50 @@ class ValidatorAgent(BaseAgent):
 
     @classmethod
     def fallback_fix(cls, error_context: dict[str, Any]) -> dict[str, Any]:
+        commands = cls.dynamic_error_patterns(error_context)
         return {
             "provider": "fallback",
             "analysis": "Pattern-based fallback remediation",
-            "commands": cls.dynamic_error_patterns(str(error_context.get("stderr") or error_context.get("error") or "")),
-            "verification": "",
+            "commands": commands,
+            "verification": commands[0] if commands else "",
             "confidence": 0.35,
         }
 
     @classmethod
-    def dynamic_error_patterns(cls, error: str = "") -> list[str]:
-        lower = error.lower()
+    def dynamic_error_patterns(cls, error: str | dict[str, Any] = "") -> list[str]:
+        error_context = error if isinstance(error, dict) else {}
+        error_text = str(
+            error_context.get("stderr")
+            or error_context.get("error")
+            or error
+            or ""
+        )
+        host, port, username = cls._ssh_target_from_context(error_context, error_text)
+        lower = error_text.lower()
+        if (
+            "ssh_protocol_banner" in lower
+            or "error reading ssh protocol banner" in lower
+            or "ssh connection failed" in lower
+            or "socket timeout" in lower
+            or "connection refused" in lower
+        ):
+            safe_host = shlex.quote(host)
+            safe_user = shlex.quote(username)
+            safe_port = int(port)
+            return [
+                f"getent hosts {safe_host} || true",
+                f"python -c \"import socket; s=socket.create_connection(({host!r}, {safe_port}), 10); print('tcp connect ok'); s.close()\"",
+                f"nc -vz -w 10 {safe_host} {safe_port} || true",
+                f"ssh -vvv -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p {safe_port} {safe_user}@{safe_host} true || true",
+            ]
+        if "authentication" in lower and "ssh" in lower:
+            safe_host = shlex.quote(host)
+            safe_user = shlex.quote(username)
+            safe_port = int(port)
+            return [
+                "python -c \"print('PEM parsed by Paramiko before authentication; verify username and EC2 key pair match')\"",
+                f"ssh -vvv -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p {safe_port} {safe_user}@{safe_host} true || true",
+            ]
         if "docker" in lower and "permission denied" in lower:
             return ["sudo systemctl restart docker || true", "sudo chmod 666 /var/run/docker.sock || true"]
         if "docker" in lower and ("not found" in lower or "no such file" in lower):
@@ -597,6 +631,35 @@ class ValidatorAgent(BaseAgent):
         if "ollama unavailable" in lower or "connection refused" in lower and "11434" in lower:
             return ["docker ps -a --filter name=ollama --format '{{.ID}}' | head -1 | xargs -r docker start"]
         return []
+
+    @staticmethod
+    def _ssh_target_from_context(error_context: dict[str, Any], error_text: str) -> tuple[str, int, str]:
+        host = "127.0.0.1"
+        port = 22
+        username = settings.ssh_user
+        context = error_context.get("context", {}) if isinstance(error_context, dict) else {}
+        if isinstance(context, dict):
+            host = str(context.get("server_ip") or context.get("host") or host)
+            username = str(context.get("username") or context.get("ssh_user") or username)
+        match = re.search(r'"host"\s*:\s*"([^"]+)"', error_text)
+        if match:
+            host = match.group(1)
+        match = re.search(r'"username"\s*:\s*"([^"]+)"', error_text)
+        if match:
+            username = match.group(1)
+        match = re.search(r'"port"\s*:\s*(\d{1,5})', error_text)
+        if match:
+            port = int(match.group(1))
+        if "@" in host:
+            parsed_user, parsed_host = host.split("@", 1)
+            username = parsed_user or username
+            host = parsed_host
+        if ":" in host and host.count(":") == 1:
+            host_part, port_part = host.rsplit(":", 1)
+            if port_part.isdigit():
+                host = host_part
+                port = int(port_part)
+        return host, port, username
 
     @staticmethod
     def is_safe_command(command: str) -> bool:
@@ -691,7 +754,28 @@ class RemediationAgent(BaseAgent):
                     command=failure.command,
                     exit_code=failure.exit_code,
                 )
+                await self.emit(
+                    "Querying Claude/Ollama for remediation commands",
+                    "action",
+                    to_agent="Validator",
+                    stage=stage,
+                    operation=operation,
+                    stderr=failure.stderr[-2000:],
+                )
                 candidates = await self.llm.query_fix_candidates(error_context)
+                await self.emit(
+                    "LLM remediation candidates received",
+                    "info",
+                    to_agent="Validator",
+                    stage=stage,
+                    candidates={
+                        provider: {
+                            "commands": len(fix.get("commands", [])),
+                            "analysis": str(fix.get("analysis", ""))[:300],
+                        }
+                        for provider, fix in candidates.items()
+                    },
+                )
                 fallback = self.validator.fallback_fix(error_context)
                 if fallback.get("commands"):
                     candidates["fallback"] = fallback
@@ -736,6 +820,7 @@ class RemediationAgent(BaseAgent):
         if not self.ssh:
             raise RuntimeError("Remote AI fix requested, but no SSH manager is attached")
         await self.emit(f"Executing remote fix: {command}", "action", stage=stage)
+        print(f"[FIX] remote: {command}", flush=True)
         if not settings.ai_auto_execute:
             await self.emit("AI_AUTO_EXECUTE is disabled; command skipped", "warn", stage=stage)
             return None
@@ -753,6 +838,7 @@ class RemediationAgent(BaseAgent):
         if not command:
             return None
         await self.emit(f"Executing local fix: {command}", "action", stage=stage)
+        print(f"[FIX] local: {command}", flush=True)
         if not settings.ai_auto_execute:
             await self.emit("AI_AUTO_EXECUTE is disabled; command skipped", "warn", stage=stage)
             return None

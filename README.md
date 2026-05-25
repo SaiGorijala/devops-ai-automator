@@ -10,6 +10,8 @@ FastAPI backend plus React UI for an autonomous DevOps deployment pipeline. A us
   - `GET /api/credentials/{session_id}`
   - `GET /api/agents/health`
   - `GET /api/agents/learnings`
+  - `GET /api/debug/ollama`
+  - `POST /api/debug/ssh-test`
   - `WS /ws/{session_id}`
 - Real SSH execution with PEM authentication through Paramiko.
 - Remote Docker and Docker Compose installation.
@@ -86,6 +88,7 @@ Useful checks:
 docker compose logs ollama-init
 docker compose exec ollama ollama list
 docker compose exec backend curl -s http://ollama:11434/api/tags
+curl -s http://localhost:8000/api/debug/ollama
 docker compose exec backend which docker
 docker compose exec backend which sonar-scanner
 ```

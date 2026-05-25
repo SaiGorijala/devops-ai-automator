@@ -37,14 +37,23 @@ services:
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
+    environment:
+      OLLAMA_HOST: http://0.0.0.0:11434
+      OLLAMA_ORIGINS: "*"
     volumes:
       - ollama_data:/root/.ollama
     command: serve
+    healthcheck:
+      test: ["CMD-SHELL", "OLLAMA_HOST=http://127.0.0.1:11434 ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   ollama-init:
     image: ollama/ollama:latest
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-coder:6.7b}

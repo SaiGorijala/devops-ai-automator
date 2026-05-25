@@ -88,6 +88,11 @@ class PipelineOrchestrator:
             settings.ssh_timeout,
             stage="init",
             fix_location="local",
+            context={
+                "server_ip": inputs.server_ip,
+                "ssh_user": inputs.ssh_user or settings.ssh_user,
+                "error_type": "SSH_connection_failure",
+            },
         )
         ai.ssh = ssh
         server_host = ssh.server_ip

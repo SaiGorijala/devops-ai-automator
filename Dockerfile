@@ -18,6 +18,8 @@ RUN apt-get update \
        curl \
        docker.io \
        git \
+       iputils-ping \
+       netcat-openbsd \
        openjdk-17-jre-headless \
        openssh-client \
        unzip \

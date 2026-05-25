@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from .config import settings
@@ -16,9 +17,11 @@ from .database import init_db
 from .event_bus import event_bus
 from .llm_client import LLMClient
 from .models import AgentLearning
+from .multi_agent import RemediationAgent, ValidatorAgent
 from .pipeline import pipeline_orchestrator
 from .schemas import DeployRequest, DeployResponse
 from .session_store import SessionNotFoundError, session_store
+from .ssh_manager import SSHManager
 
 
 app = FastAPI(title=settings.app_name, version="1.0.0")
@@ -32,6 +35,14 @@ app.add_middleware(
 )
 
 _tasks: dict[str, asyncio.Task[None]] = {}
+
+
+class DebugSSHRequest(BaseModel):
+    server_ip: str
+    pem_content: str
+    username: str | None = None
+    port: int | None = None
+    timeout: int | None = None
 
 
 def _model_dict(model: Any) -> dict[str, Any]:
@@ -84,6 +95,69 @@ async def agent_learnings(limit: int = 50) -> list[dict[str, Any]]:
             }
             for row in result.scalars()
         ]
+
+
+@app.get("/api/debug/ollama")
+async def debug_ollama() -> dict[str, Any]:
+    client = LLMClient()
+    return await client.test_ollama_generation()
+
+
+@app.post("/api/debug/ssh-test")
+async def debug_ssh_connection(request: DebugSSHRequest) -> dict[str, Any]:
+    target = request.server_ip
+    if request.port and ":" not in target:
+        target = f"{target}:{request.port}"
+    session_id = f"debug-{uuid.uuid4()}"
+    await session_store.create(
+        session_id,
+        {
+            "server_ip": request.server_ip,
+            "username": request.username or settings.ssh_user,
+            "port": request.port or 22,
+            "pem_content": "provided",
+            "debug": True,
+        },
+    )
+    llm = LLMClient()
+    validator = ValidatorAgent(session_id=session_id, llm=llm)
+    ai = RemediationAgent(session_id=session_id, llm=llm, validator=validator)
+    await ai.ensure_llm_available()
+    try:
+        ssh = await ai.monitor_and_fix(
+            SSHManager.connect,
+            target,
+            request.pem_content,
+            request.username,
+            request.timeout or settings.ssh_timeout,
+            stage="init",
+            fix_location="local",
+            context={
+                "server_ip": target,
+                "ssh_user": request.username or settings.ssh_user,
+                "error_type": "SSH_connection_failure",
+            },
+        )
+        ssh.close()
+        await session_store.complete(
+            session_id,
+            {"debug": {"ssh": "connected"}, "ai_fix_history": ai.fix_history},
+        )
+        return {
+            "success": True,
+            "session_id": session_id,
+            "ai_fixes_applied": len(ai.fix_history),
+            "ai_fix_history": ai.fix_history,
+        }
+    except Exception as exc:  # noqa: BLE001
+        await session_store.fail(session_id, str(exc))
+        return {
+            "success": False,
+            "session_id": session_id,
+            "error": str(exc),
+            "ai_fixes_applied": len(ai.fix_history),
+            "ai_fix_history": ai.fix_history,
+        }
 
 
 @app.post("/api/deploy", response_model=DeployResponse)

@@ -12,6 +12,7 @@ from typing import Any, Callable
 import httpx
 
 from .config import settings
+from .llm_client import LLMClient
 from .process import LocalCommandResult, run_command
 from .session_store import SessionStore, session_store
 from .ssh_manager import CommandResult, SSHManager
@@ -82,33 +83,39 @@ class AIAgent:
         system_info: str,
         stage: str | None = None,
     ) -> list[str]:
-        prompt = f"""You are a DevOps AI. Fix this error.
-
-Error: {error}
-Operation: {context}
-System: {system_info}
-
-Return ONLY executable bash commands, one per line, no markdown and no explanations.
-Commands must be idempotent and safe to retry.
-Do not print secrets. Do not delete application source code.
-
-Your fix commands:"""
-        try:
-            async with httpx.AsyncClient(timeout=90) as client:
-                response = await self._generate_with_model_recovery(client, prompt, stage)
-                raw = response.json().get("response", "")
-        except Exception as exc:  # noqa: BLE001
-            await self.log_ai_action(
-                f"Ollama unavailable, using fallback recovery patterns: {exc}",
-                stage=stage,
-                intervention_type="warn",
-            )
-            return []
-
-        commands = self._clean_commands(raw)
+        error_context = {
+            "command": context,
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": error,
+            "attempt": 1,
+            "max_attempts": settings.ai_max_retries,
+            "operation": context,
+            "stage": stage,
+            "context": {},
+            "system": system_info,
+        }
+        candidates = await LLMClient().query_fix_candidates(error_context)
+        commands: list[str] = []
+        for provider, fix in candidates.items():
+            provider_commands = [
+                command
+                for command in fix.get("commands", [])
+                if self._is_safe_command(str(command))
+            ]
+            if provider_commands:
+                commands = provider_commands
+                await self.log_ai_action(
+                    f"{provider} proposed {len(commands)} fix command(s) for {context}: {fix.get('analysis', '')[:300]}",
+                    stage=stage,
+                    intervention_type="action",
+                )
+                break
+        if not commands:
+            commands = self.dynamic_error_patterns(error)
         if commands:
             await self.log_ai_action(
-                f"DeepSeek proposed {len(commands)} fix command(s) for {context}",
+                f"AI proposed {len(commands)} fix command(s) for {context}",
                 stage=stage,
                 intervention_type="action",
             )
@@ -257,7 +264,28 @@ Your fix commands:"""
             return ["docker system prune -af || sudo docker system prune -af"]
         if "temporary failure resolving" in lower or "could not resolve" in lower:
             return ["sudo systemctl restart systemd-resolved || true"]
+        if (
+            "ssh_protocol_banner" in lower
+            or "error reading ssh protocol banner" in lower
+            or "ssh connection failed" in lower
+            or "socket timeout" in lower
+            or "connection refused" in lower
+        ):
+            host = self._extract_json_field(error, "host") or "127.0.0.1"
+            port = self._extract_json_field(error, "port") or "22"
+            username = self._extract_json_field(error, "username") or settings.ssh_user
+            return [
+                f"getent hosts {shlex.quote(host)} || true",
+                f"python -c \"import socket; s=socket.create_connection(({host!r}, {int(port)}), 10); print('tcp connect ok'); s.close()\"",
+                f"nc -vz -w 10 {shlex.quote(host)} {int(port)} || true",
+                f"ssh -vvv -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p {int(port)} {shlex.quote(username)}@{shlex.quote(host)} true || true",
+            ]
         return []
+
+    @staticmethod
+    def _extract_json_field(text: str, field: str) -> str | None:
+        match = re.search(rf'"{re.escape(field)}"\s*:\s*"?([^",}}]+)"?', text)
+        return match.group(1) if match else None
 
     @staticmethod
     def _install_sonar_scanner_command() -> str:
