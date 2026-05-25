@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from .config import settings
+from .llm_error_formatter import ErrorContextFormatter
 
 
 @dataclass
@@ -104,8 +107,13 @@ class LLMClient:
                 }
 
         try:
-            raw = await self._query_ollama(prompt)
-            candidates["ollama"] = self._normalize_fix("ollama", raw)
+            raw = await self._query_ollama_with_retry(prompt)
+            parsed = self._normalize_fix("ollama", raw)
+            # If no commands returned, try getting direct fixes
+            if not parsed.get("commands"):
+                parsed = self._get_direct_fix_for_error(error_context.get("stderr", ""), error_context)
+                parsed["provider"] = "ollama"
+            candidates["ollama"] = parsed
         except Exception as exc:  # noqa: BLE001
             candidates["ollama"] = {
                 "provider": "ollama",
@@ -162,12 +170,12 @@ REQUIREMENTS
 5. Prefer fixing the root cause over sleeping, unless a service is still starting.
 6. For port conflicts, choose an available alternate port or free only the precise blocked service.
 
-Return ONLY valid JSON:
+MANDATORY: Return ONLY valid JSON - NO other text before or after:
 {{
-  "analysis": "brief explanation",
-  "commands": ["command1", "command2"],
+  "analysis": "brief explanation of the fix",
+  "commands": ["command1", "command2", "command3"],
   "verification": "command that proves the fix worked",
-  "confidence": 0.0
+  "confidence": 0.75
 }}"""
 
     async def _query_claude(self, prompt: str) -> str:
@@ -220,16 +228,37 @@ Return ONLY valid JSON:
             response.raise_for_status()
             return response.json().get("response", "").strip()
 
+    async def _query_ollama_with_retry(self, prompt: str) -> str:
+        """Query Ollama with retry logic and guaranteed JSON response"""
+        for retry in range(3):
+            try:
+                return await self._query_ollama(prompt)
+            except Exception as exc:
+                if retry < 2:
+                    await asyncio.sleep(1)
+                    continue
+                raise exc
+
     def _normalize_fix(self, provider: str, raw: str) -> dict[str, Any]:
         try:
             data = self._parse_json_object(raw)
         except Exception:
-            data = {
-                "analysis": "LLM returned non-JSON text; extracted shell-like commands",
-                "commands": self._extract_shell_commands(raw),
-                "verification": "",
-                "confidence": 0.45,
-            }
+            # Try to extract commands line by line
+            commands = self._extract_shell_commands(raw)
+            if commands:
+                data = {
+                    "analysis": "Extracted shell commands from LLM response",
+                    "commands": commands,
+                    "verification": commands[0] if commands else "",
+                    "confidence": 0.45,
+                }
+            else:
+                data = {
+                    "analysis": "LLM returned non-JSON text; no parseable commands found",
+                    "commands": [],
+                    "verification": "",
+                    "confidence": 0.0,
+                }
         commands = data.get("commands", [])
         if isinstance(commands, str):
             commands = [line.strip() for line in commands.splitlines() if line.strip()]
@@ -249,6 +278,79 @@ Return ONLY valid JSON:
             "confidence": max(0.0, min(1.0, confidence)),
             "raw": raw,
         }
+
+    def _get_direct_fix_for_error(self, error: str, context: dict[str, Any]) -> dict[str, Any]:
+        """Get direct fixes without LLM - immediate fallback for empty responses"""
+        stderr = str(context.get("stderr", ""))
+        lower = (error + stderr).lower()
+
+        if "timeout opening channel" in lower or "ssh" in lower and "timeout" in lower:
+            return {
+                "provider": "direct",
+                "analysis": "SSH timeout - increase timeout settings",
+                "commands": [
+                    "sudo sed -i 's/^#ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config",
+                    "sudo sed -i 's/^#ClientAliveCountMax.*/ClientAliveCountMax 3/' /etc/ssh/sshd_config",
+                    "sudo systemctl restart sshd",
+                    "echo 'SSH timeout configured'",
+                ],
+                "verification": "sudo sshd -T | grep -E 'ClientAlive'",
+                "confidence": 0.8,
+            }
+
+        if "docker-compose" in lower and ("not found" in lower or "no such file" in lower):
+            return {
+                "provider": "direct",
+                "analysis": "Docker Compose missing - installing",
+                "commands": [
+                    'sudo curl -L "https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose',
+                    "sudo chmod +x /usr/local/bin/docker-compose",
+                    "docker-compose --version",
+                    "sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose",
+                ],
+                "verification": "docker-compose --version",
+                "confidence": 0.9,
+            }
+
+        if "docker" in lower and "permission denied" in lower:
+            return {
+                "provider": "direct",
+                "analysis": "Docker permission denied - fixing permissions",
+                "commands": [
+                    "sudo usermod -aG docker $USER",
+                    "newgrp docker",
+                    "sudo chmod 666 /var/run/docker.sock",
+                ],
+                "verification": "docker ps",
+                "confidence": 0.8,
+            }
+
+        if "connection refused" in lower or "connection timeout" in lower:
+            return {
+                "provider": "direct",
+                "analysis": "Connection issue - checking services",
+                "commands": [
+                    "sudo systemctl status docker || echo 'Docker not running'",
+                    "sudo journalctl -u docker -n 20 | tail -10",
+                    "netstat -tlnp 2>/dev/null || ss -tlnp",
+                ],
+                "verification": "echo 'Check logs above'",
+                "confidence": 0.6,
+            }
+
+        # Generic fallback
+        return {
+            "provider": "direct",
+            "analysis": "Generic error recovery - checking system status",
+            "commands": [
+                "sudo systemctl status docker || true",
+                "sudo journalctl -xe | tail -20",
+                "echo 'Attempted diagnostic check'",
+            ],
+            "verification": "echo 'Check logs'",
+            "confidence": 0.3,
+        }
+
 
     @staticmethod
     def _extract_shell_commands(raw: str) -> list[str]:

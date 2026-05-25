@@ -103,6 +103,48 @@ async def debug_ollama() -> dict[str, Any]:
     return await client.test_ollama_generation()
 
 
+@app.get("/api/debug/ollama-fix-test")
+async def debug_ollama_fix_test() -> dict[str, Any]:
+    """Test if Ollama actually returns fix commands"""
+    client = LLMClient()
+
+    test_error = "Timeout opening channel"
+    test_context = {
+        "command": "ssh connection",
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": test_error,
+        "attempt": 1,
+        "max_attempts": 3,
+        "operation": "ssh_connect",
+        "stage": "test",
+        "context": {},
+        "system": {"location": "local"},
+    }
+
+    result = {
+        "ollama_available": await client.health(),
+        "test_error": test_error,
+        "candidates": {},
+    }
+
+    try:
+        candidates = await client.query_fix_candidates(test_context)
+        for provider, fix in candidates.items():
+            result["candidates"][provider] = {
+                "has_commands": len(fix.get("commands", [])) > 0,
+                "command_count": len(fix.get("commands", [])),
+                "commands": fix.get("commands", [])[:5],
+                "analysis": fix.get("analysis", "")[:200],
+                "confidence": fix.get("confidence", 0),
+                "provider": fix.get("provider", "unknown"),
+            }
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
+
+
 @app.post("/api/debug/ssh-test")
 async def debug_ssh_connection(request: DebugSSHRequest) -> dict[str, Any]:
     target = request.server_ip
