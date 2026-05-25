@@ -43,10 +43,14 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-coder:6.7b}
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      sleep 10 &&
-      ollama pull ${DEEPSEEK_MODEL:-deepseek-coder:6.7b}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until ollama list >/dev/null 2>&1; do
+          sleep 2
+        done
+        ollama pull "$${DEEPSEEK_MODEL:-deepseek-coder:6.7b}"
     volumes:
       - ollama_data:/root/.ollama
     restart: "no"
