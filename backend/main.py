@@ -22,6 +22,9 @@ from .pipeline import pipeline_orchestrator
 from .schemas import DeployRequest, DeployResponse
 from .session_store import SessionNotFoundError, session_store
 from .ssh_manager import SSHManager
+from .credentials_manager import CredentialsManager
+from .websocket_manager import WebSocketManager
+from .agents import RepositoryAnalyzer, PipelineCommander, ExecutionSolver, ValidatorSelector
 
 
 app = FastAPI(title=settings.app_name, version="1.0.0")
@@ -35,6 +38,12 @@ app.add_middleware(
 )
 
 _tasks: dict[str, asyncio.Task[None]] = {}
+
+# Initialize global managers for multi-agent orchestration
+_llm_client = LLMClient()
+_credentials_manager = CredentialsManager()
+_ws_manager = WebSocketManager()
+_session_agents: dict[str, dict[str, Any]] = {}  # Track agents per session
 
 
 class DebugSSHRequest(BaseModel):
@@ -260,6 +269,254 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
             await websocket.send_json(event.to_dict())
     except WebSocketDisconnect:
         return
+
+
+# ============================================================================
+# MULTI-AGENT ORCHESTRATION ENDPOINTS
+# ============================================================================
+
+@app.post("/api/multi-agent/deploy")
+async def multi_agent_deploy(request: DeployRequest) -> dict[str, Any]:
+    """Start multi-agent deployment pipeline with full observability.
+    
+    1. Generate credentials automatically
+    2. Initialize 4 agents
+    3. Execute pipeline with LLM integration
+    4. Stream all activity via WebSocket
+    """
+    session_id = str(uuid.uuid4())
+    
+    try:
+        # Generate all credentials first (never ask user)
+        credentials = _credentials_manager.generate_all_credentials(request.server_ip)
+        
+        # Broadcast credentials generation
+        await _ws_manager.broadcast_credentials_generated(
+            request.server_ip,
+            list(credentials.keys())
+        )
+        
+        # Initialize agents for this session
+        agent1 = RepositoryAnalyzer(_llm_client)
+        agent2 = PipelineCommander(_llm_client)
+        agent3 = ExecutionSolver(None, _llm_client, _credentials_manager)  # SSH manager set later
+        agent4 = ValidatorSelector(_llm_client)
+        
+        _session_agents[session_id] = {
+            "agent1": agent1,
+            "agent2": agent2,
+            "agent3": agent3,
+            "agent4": agent4,
+            "credentials": credentials,
+        }
+        
+        # Start async pipeline execution
+        asyncio.create_task(
+            _run_multi_agent_pipeline(
+                session_id, request, credentials, agent1, agent2, agent3, agent4
+            )
+        )
+        
+        return {
+            "session_id": session_id,
+            "status": "started",
+            "credentials_generated": len(credentials),
+            "agents_initialized": 4,
+        }
+    except Exception as e:
+        await _ws_manager.broadcast_error("deployment_init", str(e))
+        return {"error": str(e), "session_id": session_id}
+
+
+@app.get("/api/multi-agent/credentials/{session_id}")
+async def get_agent_credentials(session_id: str) -> dict[str, Any]:
+    """Get auto-generated credentials for the session."""
+    if session_id not in _session_agents:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return _session_agents[session_id]["credentials"]
+
+
+@app.post("/api/multi-agent/credentials/regenerate/{session_id}/{service}")
+async def regenerate_service_credentials(
+    session_id: str, service: str
+) -> dict[str, Any]:
+    """Regenerate credentials for a specific service."""
+    if session_id not in _session_agents:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    try:
+        session_data = _session_agents[session_id]
+        server_ip = list(session_data["credentials"].values())[0].get("url", "").split("//")[1].split(":")[0]
+        
+        new_creds = _credentials_manager.regenerate_service(service, server_ip)
+        session_data["credentials"][service] = new_creds
+        
+        return {"success": True, "service": service, "credentials": new_creds}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/multi-agent/llm-conversations/{session_id}")
+async def get_llm_conversations(session_id: str) -> dict[str, Any]:
+    """Get all LLM conversations for observability."""
+    if session_id not in _session_agents:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    agent3 = _session_agents[session_id]["agent3"]
+    return {
+        "total_interactions": len(agent3.llm_conversations),
+        "conversations": agent3.get_llm_conversations(),
+    }
+
+
+@app.get("/api/multi-agent/agent-history/{session_id}")
+async def get_agent_history(session_id: str) -> dict[str, Any]:
+    """Get execution history for all agents."""
+    if session_id not in _session_agents:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    agents = _session_agents[session_id]
+    
+    return {
+        "execution_log": agents["agent3"].get_execution_log(),
+        "fix_history": agents["agent3"].get_fix_history(),
+        "validation_history": agents["agent4"].get_validation_history(),
+        "learned_patterns": agents["agent4"].get_agent_score_report(),
+    }
+
+
+@app.websocket("/ws/agent-activity/{session_id}")
+async def websocket_agent_activity(websocket: WebSocket, session_id: str) -> None:
+    """WebSocket for real-time agent activity streaming."""
+    await _ws_manager.connect(websocket)
+    
+    # Send message history
+    for msg in _ws_manager.get_message_history(50):
+        try:
+            await websocket.send_json(msg)
+        except Exception:
+            pass
+    
+    try:
+        while True:
+            # Keep connection alive and handle incoming messages
+            data = await websocket.receive_text()
+            # Could handle client commands here if needed
+    except WebSocketDisconnect:
+        _ws_manager.disconnect(websocket)
+
+
+# ============================================================================
+# HELPER FUNCTIONS FOR MULTI-AGENT PIPELINE
+# ============================================================================
+
+async def _run_multi_agent_pipeline(
+    session_id: str,
+    request: DeployRequest,
+    credentials: dict[str, Any],
+    agent1: RepositoryAnalyzer,
+    agent2: PipelineCommander,
+    agent3: ExecutionSolver,
+    agent4: ValidatorSelector,
+) -> None:
+    """Execute the complete multi-agent pipeline."""
+    try:
+        await _ws_manager.broadcast_status("started", {"session_id": session_id})
+        
+        # AGENT 1: Analyze repository
+        await _ws_manager.broadcast_agent_message(
+            "RepositoryAnalyzer", "started", {"repo": request.repo_url}
+        )
+        
+        repo_analysis = await agent1.analyze(request.repo_url, request.github_token)
+        
+        await _ws_manager.broadcast_agent_message(
+            "RepositoryAnalyzer", "completed", repo_analysis
+        )
+        
+        # AGENT 2: Create plan
+        await _ws_manager.broadcast_agent_message(
+            "PipelineCommander", "started", {"analysis": repo_analysis.get("project_type")}
+        )
+        
+        plan = await agent2.create_plan(repo_analysis, request.server_ip, request.repo_url)
+        
+        await _ws_manager.broadcast_agent_message(
+            "PipelineCommander", "completed", {"stages": len(plan.get("stages", []))}
+        )
+        
+        # AGENT 3: Execute with error recovery
+        ssh_manager = SSHManager()
+        agent3.ssh = ssh_manager
+        
+        await _ws_manager.broadcast_agent_message(
+            "ExecutionSolver", "ssh_connecting", {"server": request.server_ip}
+        )
+        
+        try:
+            ssh_manager.connect(request.server_ip, request.pem_content)
+        except Exception as e:
+            await _ws_manager.broadcast_error(
+                "ssh_connection", f"Failed to connect: {str(e)}"
+            )
+            await _ws_manager.broadcast_status("failed", {"error": str(e)})
+            return
+        
+        for stage in plan.get("stages", []):
+            await _ws_manager.broadcast_agent_message(
+                "ExecutionSolver", f"stage_executing", {"stage_id": stage.get("id"), "stage_name": stage.get("name")}
+            )
+            
+            success, result = await agent3.execute_with_ai_fix(
+                stage, {"repo_analysis": repo_analysis}
+            )
+            
+            if success:
+                await _ws_manager.broadcast_agent_message(
+                    "ExecutionSolver",
+                    f"stage_success_{stage.get('id')}",
+                    result,
+                )
+            else:
+                await _ws_manager.broadcast_agent_message(
+                    "ExecutionSolver",
+                    f"stage_failed_{stage.get('id')}",
+                    result,
+                )
+                # Continue with other stages or stop
+                if stage.get("critical"):
+                    break
+        
+        # AGENT 4: Validate
+        await _ws_manager.broadcast_agent_message(
+            "ValidatorSelector", "validating", {}
+        )
+        
+        validation = await agent4.validate_deployment(ssh_manager, request.server_ip)
+        
+        await _ws_manager.broadcast_agent_message(
+            "ValidatorSelector", "validation_complete", validation
+        )
+        
+        # Report learning
+        score_report = agent4.get_agent_score_report()
+        await _ws_manager.broadcast_agent_message(
+            "ValidatorSelector", "learning_report", score_report
+        )
+        
+        await _ws_manager.broadcast_status(
+            "completed",
+            {
+                "success": validation.get("success"),
+                "validation_score": validation.get("score"),
+            },
+        )
+        
+    except Exception as e:
+        print(f"[Pipeline Error] {str(e)}")
+        await _ws_manager.broadcast_error("pipeline_execution", str(e))
+        await _ws_manager.broadcast_status("failed", {"error": str(e)})
 
 
 def _jsonable(value: Any) -> Any:

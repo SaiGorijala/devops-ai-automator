@@ -391,3 +391,61 @@ MANDATORY: Return ONLY valid JSON - NO other text before or after:
         if not isinstance(payload, dict):
             raise ValueError("LLM response was not a JSON object")
         return payload
+
+    async def query(self, prompt: str, agent: str = "Unknown") -> str | None:
+        """Query LLM with agent context for observability.
+        
+        Args:
+            prompt: Prompt to send to LLM
+            agent: Agent name for tracking
+            
+        Returns:
+            LLM response text
+        """
+        try:
+            if self.claude_api_key:
+                try:
+                    response = await self._query_claude(prompt)
+                    return response
+                except Exception:
+                    pass
+
+            # Fallback to Ollama
+            response = await self._query_ollama_with_retry(prompt)
+            return response
+        except Exception as e:
+            print(f"[LLM_ERROR] Query from {agent} failed: {e}")
+            return None
+
+    async def query_for_fix(self, error_context: dict[str, Any], strategy: str = "ai_fix") -> dict[str, Any] | None:
+        """Query LLM for error fixes with comprehensive context.
+        
+        Args:
+            error_context: Complete error context
+            strategy: Fix strategy to use
+            
+        Returns:
+            Fix recommendation with commands
+        """
+        try:
+            candidates = await self.query_fix_candidates(error_context)
+            
+            # Select best candidate
+            best_candidate = None
+            best_confidence = -1.0
+            
+            for provider, candidate in candidates.items():
+                confidence = candidate.get("confidence", 0.0)
+                if isinstance(confidence, (int, float)) and confidence > best_confidence:
+                    best_confidence = confidence
+                    best_candidate = candidate
+            
+            return best_candidate or {
+                "analysis": "Unable to generate fix",
+                "commands": [],
+                "verification": "",
+                "confidence": 0.0,
+            }
+        except Exception as e:
+            print(f"[LLM_ERROR] Fix query failed: {e}")
+            return None
