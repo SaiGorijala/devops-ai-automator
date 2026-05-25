@@ -7,11 +7,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .ai_agent import AIAgent
 from .config import settings
 from .docker_builder import DockerBuilder
 from .docker_orchestrator import DockerOrchestrator, JenkinsInfo, SonarInfo
 from .github_manager import GitHubManager
+from .llm_client import LLMClient
+from .multi_agent import PipelineCommanderAgent, RemediationAgent, RepositoryAnalyzerAgent, ValidatorAgent
 from .schemas import DeploymentInputs
 from .session_store import session_store
 from .sonar_scanner import ScanResult, SonarScanner, Vulnerability
@@ -31,10 +32,12 @@ STAGE_PROGRESS = {
 
 class PipelineOrchestrator:
     async def execute_pipeline(self, session_id: str, inputs: DeploymentInputs) -> None:
-        ai = AIAgent(session_id=session_id)
+        llm = LLMClient()
+        validator = ValidatorAgent(session_id=session_id, llm=llm)
+        ai = RemediationAgent(session_id=session_id, llm=llm, validator=validator)
         try:
             await asyncio.wait_for(
-                self._execute(session_id, inputs, ai),
+                self._execute(session_id, inputs, ai, validator, llm),
                 timeout=settings.max_pipeline_duration,
             )
         except Exception as exc:  # noqa: BLE001
@@ -44,13 +47,37 @@ class PipelineOrchestrator:
             if ai.ssh:
                 ai.ssh.close()
 
-    async def _execute(self, session_id: str, inputs: DeploymentInputs, ai: AIAgent) -> None:
+    async def _execute(
+        self,
+        session_id: str,
+        inputs: DeploymentInputs,
+        ai: RemediationAgent,
+        validator: ValidatorAgent,
+        llm: LLMClient,
+    ) -> None:
         await session_store.append_log(session_id, f"Pipeline started for {inputs.repo_url}", "info")
         await session_store.add_ai_intervention(
             session_id,
-            f"AI Agent online: {settings.deepseek_model} @ {settings.ollama_host}",
+            f"Multi-agent system online: Claude={bool(settings.claude_api_key)} Ollama={settings.deepseek_model} @ {settings.ollama_host}",
             intervention_type="ok",
         )
+        await ai.ensure_llm_available()
+
+        github = GitHubManager(session_id)
+        analyzer = RepositoryAnalyzerAgent(session_id=session_id, llm=llm)
+        commander = PipelineCommanderAgent(session_id=session_id, llm=llm)
+        repo_analysis = await analyzer.analyze_repository(github, inputs, ai)
+        deployment_plan = await commander.create_plan(repo_analysis)
+        ai.deployment_context = {
+            "repo_analysis": {
+                key: value
+                for key, value in repo_analysis.items()
+                if key not in {"repo_path"}
+            },
+            "deployment_plan": deployment_plan,
+        }
+        repo_path = Path(repo_analysis["repo_path"])
+        project_type = str(deployment_plan.get("project_type") or repo_analysis.get("project_type") or "unknown")
 
         await self._start_stage(session_id, "init")
         ssh: SSHManager = await ai.monitor_and_fix(
@@ -94,17 +121,12 @@ class PipelineOrchestrator:
         await self._finish_stage(session_id, "jenkins")
 
         await self._start_stage(session_id, "scan")
-        github = GitHubManager(session_id)
-        repo_path: Path = await ai.monitor_and_fix(
-            github.clone_repo,
-            inputs.repo_url,
-            inputs.github_token,
-            inputs.branch,
+        await session_store.append_log(
+            session_id,
+            f"Repository analysis ready; detected project type: {project_type}",
+            "ok",
             stage="scan",
-            fix_location="local",
         )
-        project_type = github.detect_project_type(repo_path)
-        await session_store.append_log(session_id, f"Cloned repository; detected project type: {project_type}", "ok", stage="scan")
         scanner = SonarScanner()
         scan_result = await self._run_sonar_scan(ai, scanner, repo_path, sonar_info, session_id)
         if scan_result.vulnerabilities:
@@ -127,6 +149,7 @@ class PipelineOrchestrator:
             builder.detect_or_generate_dockerfile,
             repo_path,
             project_type,
+            deployment_plan,
             stage="docker",
             fix_location="local",
             cwd=repo_path,
@@ -163,7 +186,7 @@ class PipelineOrchestrator:
         await self._finish_stage(session_id, "push")
 
         await self._start_stage(session_id, "deploy")
-        container_port = builder.infer_container_port(repo_path, project_type)
+        container_port = builder.infer_container_port(repo_path, project_type, deployment_plan)
         app_url = await ai.monitor_and_fix(
             self.deploy_application,
             ssh,
@@ -176,6 +199,9 @@ class PipelineOrchestrator:
             stage="deploy",
             fix_location="remote",
         )
+        validation = await validator.validate_deployment(ssh, app_url, stage="deploy")
+        if settings.agent_validation_enabled and not validation.get("success"):
+            raise RuntimeError(f"Deployment validation failed: {validation.get('output') or validation.get('reason')}")
         await session_store.append_log(session_id, f"Application live at {app_url}", "ok", stage="deploy")
         await self._finish_stage(session_id, "deploy")
 
@@ -193,6 +219,13 @@ class PipelineOrchestrator:
                 "quality_gate_passed": scan_result.passed,
                 "vulnerabilities_remaining": len(scan_result.vulnerabilities),
             },
+            "repo_analysis": {
+                key: value
+                for key, value in repo_analysis.items()
+                if key not in {"repo_path"}
+            },
+            "deployment_plan": deployment_plan,
+            "validation": validation,
             "ai_interventions": ai.intervention_count,
             "ai_fix_history": ai.fix_history,
         }
@@ -206,7 +239,7 @@ class PipelineOrchestrator:
 
     async def _run_sonar_scan(
         self,
-        ai: AIAgent,
+        ai: RemediationAgent,
         scanner: SonarScanner,
         repo_path: Path,
         sonar_info: SonarInfo,
@@ -233,7 +266,7 @@ class PipelineOrchestrator:
 
     async def _fix_vulnerabilities(
         self,
-        ai: AIAgent,
+        ai: RemediationAgent,
         vulnerabilities: list[Vulnerability],
         repo_path: Path,
         session_id: str,

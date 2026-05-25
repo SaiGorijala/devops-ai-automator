@@ -8,6 +8,11 @@ services:
       APP_SECRET_KEY: ${APP_SECRET_KEY:-change-me-before-production}
       OLLAMA_HOST: http://ollama:11434
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-coder:6.7b}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-3-5-sonnet-20241022}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-90}
+      USE_MULTI_AGENT: ${USE_MULTI_AGENT:-true}
+      AGENT_VALIDATION_ENABLED: ${AGENT_VALIDATION_ENABLED:-true}
       REDIS_URL: redis://redis:6379
       DATABASE_URL: sqlite+aiosqlite:////data/devops_ai.db
       MAX_PIPELINE_DURATION: ${MAX_PIPELINE_DURATION:-1800}

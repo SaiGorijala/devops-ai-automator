@@ -37,6 +37,11 @@ class Settings:
     database_url: str = _sqlite_async_url(os.getenv("DATABASE_URL", "sqlite:///./devops_ai.db"))
     ollama_host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-coder:6.7b")
+    claude_api_key: str | None = os.getenv("CLAUDE_API_KEY")
+    claude_model: str = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+    llm_timeout: int = _int("LLM_TIMEOUT", 90)
+    use_multi_agent: bool = _bool("USE_MULTI_AGENT", True)
+    agent_validation_enabled: bool = _bool("AGENT_VALIDATION_ENABLED", True)
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379")
     max_pipeline_duration: int = _int("MAX_PIPELINE_DURATION", 1800)
     ssh_timeout: int = _int("SSH_TIMEOUT", 30)
@@ -59,4 +64,3 @@ class Settings:
 
 
 settings = Settings()
-

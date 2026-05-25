@@ -27,3 +27,15 @@ class PipelineSession(Base):
     stages = Column(JSON, nullable=False, default=dict)
     error = Column(Text, nullable=True)
 
+
+class AgentLearning(Base):
+    __tablename__ = "agent_learnings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider = Column(String, nullable=False, index=True)
+    error_signature = Column(String, nullable=False, index=True)
+    successes = Column(Integer, nullable=False, default=0)
+    failures = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    last_fix = Column(JSON, nullable=False, default=dict)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)

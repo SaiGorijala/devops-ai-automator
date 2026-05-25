@@ -118,6 +118,8 @@ export default function App() {
   const [activeStage, setActiveStage] = useState(null);
   const [logs, setLogs] = useState([]);
   const [aiLog, setAiLog] = useState([]);
+  const [agentEvents, setAgentEvents] = useState([]);
+  const [activeAgentName, setActiveAgentName] = useState("Standby");
   const [progress, setProgress] = useState(0);
   const [creds, setCreds] = useState(null);
   const [pemName, setPemName] = useState("");
@@ -186,6 +188,17 @@ export default function App() {
     }
     if (Array.isArray(snapshot.ai_interventions)) {
       setAiLog(snapshot.ai_interventions.map(entry => ({ ...entry, id: Date.now() + Math.random() })));
+      const events = snapshot.ai_interventions
+        .filter(entry => entry.agent || entry.agent_message)
+        .map(entry => entry.agent_message || {
+          from_agent: entry.agent,
+          to_agent: "ui",
+          type: entry.type,
+          content: { message: entry.text, stage: entry.stage },
+          timestamp: entry.timestamp,
+        });
+      setAgentEvents(events.map(entry => ({ ...entry, id: Date.now() + Math.random() })));
+      if (events.length) setActiveAgentName(events[events.length - 1].from_agent || "Standby");
     }
     if (snapshot.outputs && Object.keys(snapshot.outputs).length) {
       setCreds(normalizeCreds(snapshot.outputs));
@@ -212,6 +225,8 @@ export default function App() {
     setStatus("running");
     setLogs([]);
     setAiLog([]);
+    setAgentEvents([]);
+    setActiveAgentName("Starting");
     setStageStatus({});
     setActiveStage(null);
     setProgress(0);
@@ -263,8 +278,14 @@ export default function App() {
         }
         if (message.type === "ai_action") {
           addAiLog(data);
+          if (data.agent) setActiveAgentName(data.agent);
           setGlitch(true);
           setTimeout(() => setGlitch(false), 300);
+          return;
+        }
+        if (message.type === "agent_event") {
+          setAgentEvents(prev => [...prev, { ...data, id: Date.now() + Math.random() }].slice(-200));
+          if (data.from_agent) setActiveAgentName(data.from_agent);
           return;
         }
         if (message.type === "stage_update") {
@@ -716,8 +737,8 @@ export default function App() {
                   animation: "ai-pulse 2s infinite",
                 }} />
                 <div>
-                  <div style={{ fontSize: 9, color: "#cc44ff", letterSpacing: 2, fontFamily: "'Orbitron', sans-serif" }}>AI AGENT</div>
-                  <div style={{ fontSize: 10, color: "#884499", fontFamily: "'Share Tech Mono', monospace" }}>deepseek-coder:6.7b</div>
+                  <div style={{ fontSize: 9, color: "#cc44ff", letterSpacing: 2, fontFamily: "'Orbitron', sans-serif" }}>ACTIVE AGENT</div>
+                  <div style={{ fontSize: 10, color: "#884499", fontFamily: "'Share Tech Mono', monospace" }}>{activeAgentName}</div>
                 </div>
                 <div style={{ marginLeft: "auto", fontSize: 9, color: "#cc44ff", fontFamily: "'Share Tech Mono', monospace" }}>
                   {aiLog.filter(e => e.type === "action").length} fixes
@@ -830,12 +851,13 @@ export default function App() {
 
           {/* AI Stats */}
           <div style={{
-            display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1,
+            display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 1,
             borderBottom: "1px solid #0d2a4a",
           }}>
             {[
               { label: "FIXES", value: aiLog.filter(e => e.type === "action").length },
               { label: "ERRORS", value: aiLog.filter(e => e.type === "error").length },
+              { label: "AGENTS", value: new Set(agentEvents.map(e => e.from_agent).filter(Boolean)).size },
             ].map(stat => (
               <div key={stat.label} style={{ padding: "8px 12px", borderRight: "1px solid #0d2a4a" }}>
                 <div style={{ fontSize: 18, fontWeight: 700, color: "#cc44ff", fontFamily: "'Orbitron', sans-serif" }}>{stat.value}</div>
@@ -846,6 +868,17 @@ export default function App() {
 
           {/* AI Log */}
           <div style={{ flex: 1, overflowY: "auto", padding: "10px 10px", maxHeight: "calc(100vh - 280px)" }}>
+            {agentEvents.length > 0 && (
+              <div style={{ marginBottom: 10, borderBottom: "1px solid #1a0a3a", paddingBottom: 8 }}>
+                <div style={{ fontSize: 8, color: "#884499", letterSpacing: 2, marginBottom: 6, fontFamily: "'Orbitron', sans-serif" }}>AGENT MESSAGES</div>
+                {agentEvents.slice(-4).map(entry => (
+                  <div key={entry.id} className="ai-entry" style={{ borderLeftColor: "#00d4ff", marginBottom: 4 }}>
+                    <div style={{ fontSize: 9, color: "#00d4ff", marginBottom: 2 }}>{entry.from_agent} → {entry.to_agent}</div>
+                    <div style={{ color: "#8899bb", fontSize: 10 }}>{entry.content?.message || entry.type}</div>
+                  </div>
+                ))}
+              </div>
+            )}
             {aiLog.length === 0 ? (
               <div style={{ color: "#1a1a3a", fontSize: 10, fontFamily: "'Share Tech Mono', monospace", padding: "20px 0", textAlign: "center" }}>
                 AI standing by...<span style={{ animation: "blink 1s infinite", display: "inline-block" }}>█</span>
@@ -872,7 +905,7 @@ export default function App() {
           <div style={{ borderTop: "1px solid #0d2a4a", padding: "10px 12px" }}>
             <div style={{ fontSize: 8, color: "#1a3a6a", letterSpacing: 2, marginBottom: 8, fontFamily: "'Orbitron', sans-serif" }}>AGENT ARCHITECTURE</div>
             <div style={{ display: "flex", alignItems: "center", gap: 3, flexWrap: "wrap" }}>
-              {["DETECT", "→", "LOG", "→", "QUERY", "→", "FIX", "→", "VERIFY"].map((step, i) => (
+              {["ANALYZE", "→", "PLAN", "→", "EXECUTE", "→", "VALIDATE"].map((step, i) => (
                 <span key={i} style={{
                   fontSize: 8, fontFamily: "'Orbitron', sans-serif",
                   color: step === "→" ? "#0d2a4a" : "#334466",

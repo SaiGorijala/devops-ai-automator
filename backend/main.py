@@ -8,10 +8,14 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 
 from .config import settings
+from .database import AsyncSessionLocal
 from .database import init_db
 from .event_bus import event_bus
+from .llm_client import LLMClient
+from .models import AgentLearning
 from .pipeline import pipeline_orchestrator
 from .schemas import DeployRequest, DeployResponse
 from .session_store import SessionNotFoundError, session_store
@@ -49,6 +53,37 @@ async def health() -> dict[str, str]:
         "ollama_host": settings.ollama_host,
         "model": settings.deepseek_model,
     }
+
+
+@app.get("/api/agents/health")
+async def agent_health() -> dict[str, Any]:
+    return {
+        "multi_agent": settings.use_multi_agent,
+        "validation_enabled": settings.agent_validation_enabled,
+        "llm": await LLMClient().health(),
+    }
+
+
+@app.get("/api/agents/learnings")
+async def agent_learnings(limit: int = 50) -> list[dict[str, Any]]:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(AgentLearning)
+            .order_by(AgentLearning.updated_at.desc())
+            .limit(max(1, min(limit, 200)))
+        )
+        return [
+            {
+                "provider": row.provider,
+                "error_signature": row.error_signature,
+                "successes": row.successes,
+                "failures": row.failures,
+                "last_error": row.last_error,
+                "last_fix": row.last_fix,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+            for row in result.scalars()
+        ]
 
 
 @app.post("/api/deploy", response_model=DeployResponse)

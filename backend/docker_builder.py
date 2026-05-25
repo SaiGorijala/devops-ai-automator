@@ -2,18 +2,25 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
+from typing import Any
 
 from .process import run_command
 
 
 class DockerBuilder:
-    def detect_or_generate_dockerfile(self, project_path: str | Path, project_type: str) -> str:
+    def detect_or_generate_dockerfile(
+        self,
+        project_path: str | Path,
+        project_type: str,
+        deployment_plan: dict[str, Any] | None = None,
+    ) -> str:
         path = Path(project_path)
         dockerfile = path / "Dockerfile"
         if dockerfile.exists():
             return dockerfile.read_text(encoding="utf-8", errors="replace")
-        content = self._generate(project_type, path)
+        content = self._generate(project_type, path, deployment_plan or {})
         dockerfile.write_text(content, encoding="utf-8")
         return content
 
@@ -47,7 +54,19 @@ class DockerBuilder:
             pushed.append(tag)
         return pushed
 
-    def infer_container_port(self, project_path: str | Path, project_type: str) -> int:
+    def infer_container_port(
+        self,
+        project_path: str | Path,
+        project_type: str,
+        deployment_plan: dict[str, Any] | None = None,
+    ) -> int:
+        if deployment_plan and deployment_plan.get("port"):
+            try:
+                port = int(deployment_plan["port"])
+                if 1 <= port <= 65535:
+                    return port
+            except (TypeError, ValueError):
+                pass
         dockerfile = Path(project_path) / "Dockerfile"
         if dockerfile.exists():
             match = re.search(r"(?im)^\s*EXPOSE\s+(\d+)", dockerfile.read_text(encoding="utf-8", errors="replace"))
@@ -61,7 +80,9 @@ class DockerBuilder:
             return 8080
         return 3000
 
-    def _generate(self, project_type: str, path: Path) -> str:
+    def _generate(self, project_type: str, path: Path, deployment_plan: dict[str, Any]) -> str:
+        if deployment_plan.get("start_command"):
+            return self._plan_dockerfile(project_type, path, deployment_plan)
         if project_type == "nodejs":
             return self._node_dockerfile(path)
         if project_type == "python":
@@ -71,6 +92,77 @@ class DockerBuilder:
         if project_type == "go":
             return self._go_dockerfile()
         return self._generic_dockerfile()
+
+    def _plan_dockerfile(self, project_type: str, path: Path, deployment_plan: dict[str, Any]) -> str:
+        port = self._plan_port(deployment_plan, project_type)
+        install_command = self._safe_shell_line(str(deployment_plan.get("install_command") or ""))
+        build_command = self._safe_shell_line(str(deployment_plan.get("build_command") or ""))
+        start_command = self._safe_shell_line(str(deployment_plan.get("start_command") or ""))
+        if not start_command:
+            return self._generate(project_type, path, {})
+
+        if project_type == "nodejs":
+            pre_copy = "COPY package*.json ./\n"
+            install = install_command or "if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+            build = f"RUN {build_command}\n" if build_command else ""
+            return f"""FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+{pre_copy}RUN {install}
+COPY . .
+{build}EXPOSE {port}
+CMD ["sh", "-lc", {json.dumps(start_command)}]
+"""
+
+        if project_type == "python":
+            install = install_command or "if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; else pip install --no-cache-dir .; fi"
+            build = f"RUN {build_command}\n" if build_command else ""
+            return f"""FROM python:3.11-slim-bookworm
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT={port}
+COPY . .
+RUN {install}
+{build}EXPOSE {port}
+CMD ["sh", "-lc", {json.dumps(start_command)}]
+"""
+
+        if project_type == "go":
+            install = f"RUN {install_command}\n" if install_command else "RUN go mod download\n"
+            build = build_command if "/out/app" in build_command else "go build -o /out/app ."
+            return f"""FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY . .
+{install}RUN {build}
+
+FROM alpine:3.20
+WORKDIR /app
+COPY --from=build /out/app /app/app
+EXPOSE {port}
+CMD ["sh", "-lc", {json.dumps(start_command)}]
+"""
+
+        if project_type == "java":
+            builder = "maven:3.9-eclipse-temurin-17" if (path / "pom.xml").exists() else "gradle:8-jdk17"
+            install = install_command or ("mvn -q -DskipTests package" if (path / "pom.xml").exists() else "gradle build -x test --no-daemon")
+            return f"""FROM {builder} AS build
+WORKDIR /app
+COPY . .
+RUN {install}
+
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY --from=build /app /app
+EXPOSE {port}
+CMD ["sh", "-lc", {json.dumps(start_command)}]
+"""
+
+        return f"""FROM alpine:3.20
+WORKDIR /app
+RUN apk add --no-cache bash curl
+COPY . .
+EXPOSE {port}
+CMD ["sh", "-lc", {json.dumps(start_command)}]
+"""
 
     @staticmethod
     def _node_dockerfile(path: Path) -> str:
@@ -170,3 +262,28 @@ WORKDIR /usr/share/nginx/html
 COPY . .
 EXPOSE 80
 """
+
+    @staticmethod
+    def _plan_port(deployment_plan: dict[str, Any], project_type: str) -> int:
+        try:
+            port = int(deployment_plan.get("port"))
+            if 1 <= port <= 65535:
+                return port
+        except (TypeError, ValueError):
+            pass
+        return {"nodejs": 3000, "python": 8000, "java": 8080, "go": 8080}.get(project_type, 3000)
+
+    @staticmethod
+    def _safe_shell_line(command: str) -> str:
+        command = command.strip()
+        if not command:
+            return ""
+        command = command.replace("\r", " ").replace("\n", " ")
+        blocked = ("/dev/sd", "mkfs", "shutdown", "poweroff", "reboot", "rm -rf /")
+        if any(token in command.lower() for token in blocked):
+            return ""
+        try:
+            shlex.split(command)
+        except ValueError:
+            return ""
+        return command

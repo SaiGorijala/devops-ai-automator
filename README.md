@@ -8,6 +8,8 @@ FastAPI backend plus React UI for an autonomous DevOps deployment pipeline. A us
   - `POST /api/deploy`
   - `GET /api/status/{session_id}`
   - `GET /api/credentials/{session_id}`
+  - `GET /api/agents/health`
+  - `GET /api/agents/learnings`
   - `WS /ws/{session_id}`
 - Real SSH execution with PEM authentication through Paramiko.
 - Remote Docker and Docker Compose installation.
@@ -15,8 +17,11 @@ FastAPI backend plus React UI for an autonomous DevOps deployment pipeline. A us
 - Remote Jenkins deployment with plugin install attempt and initial admin password retrieval.
 - Git clone, project type detection, Dockerfile generation, Docker build, DockerHub login/push.
 - SonarQube scanner integration using the scanner Docker image.
-- Ollama DeepSeek recovery agent with retry logic, fallback patterns, command history, and WebSocket AI events.
+- Multi-agent AI layer with repository analysis, pipeline planning, execution remediation, and validation agents.
+- Claude API support with automatic fallback to Ollama DeepSeek and deterministic recovery patterns.
+- Ollama DeepSeek recovery with retry logic, fallback patterns, command history, and WebSocket AI events.
 - SQLite session persistence with encrypted submitted inputs.
+- SQLite agent learning table for provider success/failure scoring.
 - Vite wrapper around the existing React component.
 
 ## Requirements
@@ -64,6 +69,15 @@ Default model:
 
 ```text
 deepseek-coder:6.7b
+```
+
+Optional Claude-first multi-agent configuration:
+
+```env
+CLAUDE_API_KEY=
+CLAUDE_MODEL=claude-3-5-sonnet-20241022
+USE_MULTI_AGENT=true
+AGENT_VALIDATION_ENABLED=true
 ```
 
 Useful checks:
