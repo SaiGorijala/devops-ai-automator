@@ -1,0 +1,265 @@
+/* Agent Activity Panel Styles */
+.agent-activity-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: rgba(10, 14, 39, 0.5);
+  border-radius: 8px;
+}
+
+.agent-activity-panel h3 {
+  color: var(--primary);
+  margin-bottom: 1rem;
+  font-size: 1rem;
+}
+
+.panel-controls {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.agent-filter {
+  padding: 0.5rem 1rem;
+  background: rgba(0, 0, 0, 0.3);
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.agent-filter:hover {
+  border-color: var(--primary);
+  background: rgba(0, 212, 255, 0.1);
+}
+
+.panel-tabs {
+  display: flex;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+.tab-btn {
+  padding: 0.75rem 1rem;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  transition: var(--transition);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+}
+
+.tab-btn:hover {
+  color: var(--primary);
+}
+
+.tab-btn.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+
+.panel-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.activities-list,
+.llm-interactions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.activity-item {
+  background: rgba(0, 20, 40, 0.5);
+  border-left: 3px solid var(--primary);
+  border-radius: 6px;
+  padding: 1rem;
+  transition: var(--transition);
+  cursor: pointer;
+}
+
+.activity-item:hover {
+  background: rgba(0, 20, 40, 0.8);
+  border-left-width: 5px;
+  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.1);
+}
+
+.activity-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.activity-agent {
+  font-weight: 700;
+  font-size: 0.9rem;
+  min-width: 120px;
+}
+
+.activity-action {
+  flex: 1;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.activity-time {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-family: monospace;
+  min-width: 90px;
+  text-align: right;
+}
+
+.activity-details {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.activity-details pre {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.llm-interaction-item {
+  background: rgba(204, 68, 255, 0.05);
+  border: 1px solid rgba(204, 68, 255, 0.3);
+  border-radius: 6px;
+  padding: 1rem;
+  transition: var(--transition);
+}
+
+.llm-interaction-item:hover {
+  background: rgba(204, 68, 255, 0.1);
+  border-color: rgba(204, 68, 255, 0.5);
+}
+
+.llm-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.llm-agent {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.llm-direction {
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.llm-direction.query {
+  color: var(--warning);
+  border: 1px solid var(--warning);
+}
+
+.llm-direction.response {
+  color: var(--success);
+  border: 1px solid var(--success);
+}
+
+.llm-time {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-family: monospace;
+}
+
+.llm-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.llm-prompt,
+.llm-response {
+  background: rgba(0, 0, 0, 0.3);
+  border-left: 3px solid;
+  border-radius: 4px;
+  padding: 0.75rem;
+}
+
+.llm-prompt {
+  border-left-color: var(--warning);
+}
+
+.llm-response {
+  border-left-color: var(--success);
+}
+
+.llm-label {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.llm-prompt pre,
+.llm-response pre {
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: var(--text-secondary);
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+.empty-state p {
+  margin: 0;
+}
+
+/* Scrollbar */
+.panel-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.panel-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.panel-content::-webkit-scrollbar-thumb {
+  background: rgba(0, 212, 255, 0.3);
+  border-radius: 4px;
+}
+
+.panel-content::-webkit-scrollbar-thumb:hover {
+  background: var(--primary);
+}

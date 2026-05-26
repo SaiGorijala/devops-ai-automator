@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
+import "../styles/AgentActivityPanel.css";
 
 /**
  * AgentActivityPanel - Real-time display of multi-agent orchestration activity
  * Shows agent actions and LLM interactions with full observability
  */
-function AgentActivityPanel({ sessionId }) {
+function AgentActivityPanel({ sessionId, apiBase = "http://localhost:8000" }) {
   const [activities, setActivities] = useState([]);
   const [llmInteractions, setLlmInteractions] = useState([]);
   const [selectedAgent, setSelectedAgent] = useState("all");
@@ -15,7 +16,8 @@ function AgentActivityPanel({ sessionId }) {
   useEffect(() => {
     if (!sessionId) return;
 
-    const ws = new WebSocket(`ws://localhost:8000/ws/agent-activity/${sessionId}`);
+    const wsUrl = apiBase.replace(/^http/, "ws");
+    const ws = new WebSocket(`${wsUrl}/ws/agent-activity/${sessionId}`);
 
     ws.onopen = () => {
       console.log("[WS] Connected to agent activity stream");
