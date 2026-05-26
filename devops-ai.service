@@ -1,0 +1,15 @@
+[Unit]
+Description=DevOps AI Automator Backend
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/devops-ai-automator
+Environment="FRONTEND_BUILD_DIR=/opt/devops-ai-automator/backend/frontend_static"
+ExecStart=/opt/devops-ai-automator/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

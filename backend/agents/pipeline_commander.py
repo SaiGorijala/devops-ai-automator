@@ -121,7 +121,7 @@ class PipelineCommander:
                 "description": f"Clone repository and build using {repo_analysis.get('project_type')}",
                 "commands": [
                     f"git clone {repo_url} /tmp/repo || cd /tmp/repo && git pull",
-                    f"cd /tmp/repo && {repo_analysis.get('build_command', 'echo \"Build ready\"')}",
+                    f"cd /tmp/repo && {repo_analysis.get('build_command', 'echo Build ready')}",
                     "ls -la /tmp/repo/",
                 ],
                 "error_handling": "ai_fix_with_retry",
